@@ -16,238 +16,204 @@
   research, community science projects, and conservation efforts within the Susquehanna River Valley.
 
   Author: Douglas Fessler
-  Date: 04192025
+  Date: 05222025
 */
 
-// Include necessary libraries for WiFi, DHT sensor, SD card, RTC, and credentials
-#include "WiFiS3.h"         // Library for WiFi on Nano 33 IoT
-#include "DHT.h"            // Library for DHT temperature/humidity sensor
-#include "SD.h"             // SD card library
-#include "arduino_secrets.h" // Contains SSID and password (keep this file secure)
-#include "RTC.h"            // Real-time clock library
+// ---------- Libraries ----------
+#include <DHT.h>                   // Library for DHT sensor
+#include <SPI.h>                   // SPI for SD card
+#include <SD.h>                    // SD card file handling
+#include <Wire.h>                  // I2C communication for RTC
+#include <RTClib.h>                // Real-time clock
+#include <WiFiS3.h>                // WiFi for Arduino Uno R4 / Nano ESP32
+#include <OneWire.h>               // OneWire communication for DS18B20
+#include <DallasTemperature.h>     // Dallas library for DS18B20 sensor
+#include "arduino_secrets.h"       // Contains SECRET_SSID and SECRET_PASS
 
-// WiFi credentials from arduino_secrets.h
-char ssid[] = SECRET_SSID;
-char pass[] = SECRET_PASS;
+// ---------- Sensor & Hardware Pins ----------
+#define DHTPIN 2                   // DHT sensor connected to pin 2
+#define DHTTYPE DHT11              // Define sensor type (DHT11)
+#define ONE_WIRE_BUS 3             // DS18B20 connected to pin 3
+const int chipSelect = 10;         // CS pin for SD card module
 
-int keyIndex = 0; // Not used for Nano 33 IoT but required for WiFi.begin()
-int led = LED_BUILTIN; // Built-in LED pin
-int status = WL_IDLE_STATUS; // WiFi connection status
-WiFiServer server(80); // Web server listening on port 80
+// ---------- Object Instantiation ----------
+DHT dht(DHTPIN, DHTTYPE);          // Create DHT object
+RTC_DS1307 rtc;                    // Create RTC object
+OneWire oneWire(ONE_WIRE_BUS);     // Setup OneWire bus
+DallasTemperature sensors(&oneWire); // Create DS18B20 object
 
-// DHT Sensor configuration
-#define DHTPIN 2           // Digital pin connected to the DHT sensor
-#define DHTTYPE DHT11      // Type of DHT sensor
-DHT dht(DHTPIN, DHTTYPE);  // Initialize DHT sensor
+// ---------- WiFi Config ----------
+char ssid[] = SECRET_SSID;         // WiFi SSID
+char pass[] = SECRET_PASS;         // WiFi password
+WiFiServer server(80);             // Start web server on port 80
+int status = WL_IDLE_STATUS;       // WiFi status variable
 
-File dataFile; // File object for reading/writing SD data
-
-// Data logging interval (in milliseconds) — 15 minutes
-const unsigned long interval = 900000;
-unsigned long previousMillis = 0; // Used to track elapsed time for data logging
+// ---------- Timing ----------
+unsigned long interval = 900000;   // Log data every 15 minutes
+unsigned long previousMillis = 0;  // Tracks time for interval
 
 void setup() {
-  Serial.begin(9600); // Initialize serial communication for debugging
+  Serial.begin(9600);
+  dht.begin();
+  sensors.begin();
+  Wire.begin();
 
-  // Initialize the RTC and set the initial time
-  RTC.begin();
-  RTCTime startTime(16, Month::JULY, 2023, 10, 14, 03, DayOfWeek::SATURDAY, SaveLight::SAVING_TIME_ACTIVE);
-  RTC.setTime(startTime);
-
-  // Wait for Serial monitor to open (helpful during development)
-  while (!Serial) {
-    ;
+  // ---------- Initialize RTC ----------
+  if (!rtc.begin()) {
+    Serial.println("Couldn't find RTC");
+    while (1); // Halt if RTC is not found
   }
+  // Uncomment line below to manually set RTC time (only once)
+  // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
 
-  Serial.println("Access Point Web Server");
-
-  pinMode(led, OUTPUT); // Set LED pin as output
-
-  // Check for the presence of the WiFi module
-  if (WiFi.status() == WL_NO_MODULE) {
-    Serial.println("Communication with WiFi module failed!");
-    while (true); // Halt program
-  }
-
-  // Optional firmware check
-  String fv = WiFi.firmwareVersion();
-  if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
-    Serial.println("Please upgrade the firmware");
-  }
-
-  // Configure a static IP address for the access point
-  WiFi.config(IPAddress(192, 48, 56, 2));
-
-  // Create WiFi access point
-  Serial.print("Creating access point named: ");
-  Serial.println(ssid);
-  status = WiFi.beginAP(ssid, pass);
-  if (status != WL_AP_LISTENING) {
-    Serial.println("Creating access point failed");
-    while (true);
-  }
-
-  delay(10000); // Delay to allow AP to fully initialize
-
-  server.begin(); // Start the web server
-  printWiFiStatus(); // Output the AP IP address
-
-  dht.begin(); // Initialize DHT sensor
-
-  // Initialize the SD card
-  if (!SD.begin(10)) {
+  // ---------- Initialize SD Card ----------
+  if (!SD.begin(chipSelect)) {
     Serial.println("SD card initialization failed!");
-    while (true);
+    while (1); // Halt if SD card not found
+  }
+  Serial.println("SD card initialized.");
+
+  // ---------- Initialize Log File ----------
+  File dataFile = SD.open("datalog.csv", FILE_WRITE);
+  if (dataFile && dataFile.size() == 0) {
+    // Write headers if new file
+    dataFile.println("Date,Time,Humidity (%),Air Temp (C),Air Temp (F),Heat Index (C),Heat Index (F),Water Temp (C)");
+  }
+  dataFile.close();
+
+  // ---------- Setup WiFi Access Point ----------
+  if (WiFi.status() == WL_NO_MODULE) {
+    Serial.println("WiFi module not found");
+    while (true); // Halt if no module
   }
 
-  // Create and write header to data log file
-  dataFile = SD.open("data.txt", FILE_WRITE);
-  if (dataFile) {
-    dataFile.println("Date,Time,Temperature,Humidity");
-    dataFile.close();
-  } else {
-    Serial.println("Error opening data.txt file!");
-    while (true);
-  }
+  WiFi.config(IPAddress(192, 168, 4, 1));  // Optional: static IP
+  status = WiFi.beginAP(ssid, pass);      // Start access point
+  delay(10000);                           // Allow WiFi to stabilize
+  server.begin();                         // Start server
+
+  printWiFiStatus();                      // Show connection info
 }
 
 void loop() {
-  RTCTime currentTime;
-  RTC.getTime(currentTime); // Get current date/time from RTC
-
-  // Monitor and print WiFi connection status changes
-  if (status != WiFi.status()) {
-    status = WiFi.status();
-    if (status == WL_AP_CONNECTED) {
-      Serial.println("Device connected to AP");
-    } else {
-      Serial.println("Device disconnected from AP");
-    }
-  }
-
-  WiFiClient client = server.available(); // Listen for incoming HTTP clients
-
+  // ---------- Handle Web Client ----------
+  WiFiClient client = server.available();
   if (client) {
     Serial.println("New client connected");
     String currentLine = "";
 
     while (client.connected()) {
-      delayMicroseconds(10);
-
       if (client.available()) {
         char c = client.read();
-        Serial.write(c);
-
         if (c == '\n') {
-          // End of HTTP header
           if (currentLine.length() == 0) {
-            // Send HTTP response
+            // Send HTTP header
             client.println("HTTP/1.1 200 OK");
-            client.println("Content-type:text/html");
+            client.println("Content-Type: text/html");
             client.println();
 
-            // Get current sensor readings
-            float temperature = dht.readTemperature();
-            float temperaturef = dht.readTemperature(true);
-            float humidity = dht.readHumidity();
+            // Send HTML body
+            client.println("<html><head><title>Sensor Dashboard</title></head><body>");
+            client.println("<h2>Live Sensor Readings</h2>");
 
-            // Output sensor data to browser
-            client.print("<p style=\"font-size:2vw;\"> Current Temperature Celsius: ");
-            client.print(temperature);
-            client.print(" &#8451;<br></p>");
+            // Read sensors
+            float h = dht.readHumidity();
+            float t = dht.readTemperature();
+            float f = dht.readTemperature(true);
+            float hic = dht.computeHeatIndex(t, h, false);
+            float hif = dht.computeHeatIndex(f, h);
+            sensors.requestTemperatures();
+            float waterTempC = sensors.getTempCByIndex(0);
 
-            client.print("<p style=\"font-size:2vw;\"> Current Temperature Fahrenheit: ");
-            client.print(temperaturef);
-            client.print(" &#8457;<br></p>");
+            // Display live data
+            client.print("<p><strong>Air Humidity:</strong> "); client.print(h); client.println("%</p>");
+            client.print("<p><strong>Air Temperature:</strong> "); client.print(t); client.print("&deg; C / "); client.print(f); client.println("&deg; F</p>");
+            client.print("<p><strong>Heat Index:</strong> "); client.print(hic); client.print("&deg; C / "); client.print(hif); client.println("&deg; F</p>");
+            client.print("<p><strong>Water Temperature:</strong> "); client.print(waterTempC); client.println("&deg; C</p>");
 
-            client.print("<p style=\"font-size:2vw;\">Current Humidity: ");
-            client.print(humidity);
-            client.print(" %<br></p>");
+            // Display log data
+            client.println("<h3>Log Data</h3><table border='1'><tr><th>Date</th><th>Time</th><th>Humidity</th><th>Air Temp (C)</th><th>Air Temp (F)</th><th>HI (C)</th><th>HI (F)</th><th>Water Temp (C)</th></tr>");
 
-            // Display logged data from SD card
-            client.println("<h2>Data from data.txt:</h2>");
-            client.println("<table>");
-            client.println("<tr><th>Date</th><th>Time</th><th>Temperature</th><th>Humidity</th></tr>");
-
-            dataFile = SD.open("data.txt", FILE_READ);
+            File dataFile = SD.open("datalog.csv");
             if (dataFile) {
               while (dataFile.available()) {
                 String line = dataFile.readStringUntil('\n');
-                if (line.startsWith("Date,Time,Temperature,Humidity")) continue;
+                int startIdx = 0;
+                int endIdx = 0;
 
-                // Parse and display table rows
-                client.println("<tr>");
-                client.println("<td>" + line.substring(0, line.indexOf(',')) + "</td>");
-                client.println("<td>" + line.substring(line.indexOf(',') + 1) + "</td>");
-                client.println("</tr>");
+                client.print("<tr>");
+                while ((endIdx = line.indexOf(',', startIdx)) != -1) {
+                  client.print("<td>");
+                  client.print(line.substring(startIdx, endIdx));
+                  client.print("</td>");
+                  startIdx = endIdx + 1;
+                }
+                client.print("<td>");
+                client.print(line.substring(startIdx));
+                client.println("</td></tr>");
               }
               dataFile.close();
             } else {
-              Serial.println("Error opening data.txt file for reading!");
+              client.println("<p>Error opening datalog.csv</p>");
             }
 
-            client.println("</table>");
-            client.println();
-            break; // Exit response loop
-          } else {
-            currentLine = "";
+            client.println("</table></body></html>");
+            break; // Done sending response
           }
+          currentLine = "";
         } else if (c != '\r') {
           currentLine += c;
         }
       }
     }
-
-    client.stop(); // Close client connection
+    client.stop();
     Serial.println("Client disconnected");
   }
 
-  // Handle data logging every 15 minutes
+  // ---------- Handle Data Logging ----------
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= interval) {
     previousMillis = currentMillis;
 
-    float temperature = dht.readTemperature();
-    float humidity = dht.readHumidity();
+    DateTime now = rtc.now();              // Get current time
+    float h = dht.readHumidity();          // Humidity
+    float t = dht.readTemperature();       // Temp in C
+    float f = dht.readTemperature(true);   // Temp in F
+    float hic = dht.computeHeatIndex(t, h, false);
+    float hif = dht.computeHeatIndex(f, h);
 
-    dataFile = SD.open("data.txt", FILE_WRITE);
+    sensors.requestTemperatures();
+    float waterTempC = sensors.getTempCByIndex(0);
+
+    // Check sensor validity
+    if (isnan(h) || isnan(t) || isnan(f) || waterTempC == DEVICE_DISCONNECTED_C) {
+      Serial.println("Sensor read failed!");
+      return;
+    }
+
+    // Save data to SD card
+    File dataFile = SD.open("datalog.csv", FILE_WRITE);
     if (dataFile) {
-      // Write date in DD/MM/YYYY format
-      dataFile.print(currentTime.getDayOfMonth());
-      dataFile.print("/");
-      dataFile.print(Month2int(currentTime.getMonth()));
-      dataFile.print("/");
-      dataFile.print(currentTime.getYear());
-      dataFile.print(",");
-
-      // Write time in HH:MM:SS format
-      dataFile.print(currentTime.getHour());
-      dataFile.print(":");
-      dataFile.print(currentTime.getMinutes());
-      dataFile.print(":");
-      dataFile.print(currentTime.getSeconds());
-      dataFile.print(",");
-
-      // Write sensor readings
-      dataFile.print(temperature);
-      dataFile.print(",");
-      dataFile.println(humidity);
+      dataFile.print(now.timestamp(DateTime::TIMESTAMP_DATE)); dataFile.print(",");
+      dataFile.print(now.timestamp(DateTime::TIMESTAMP_TIME)); dataFile.print(",");
+      dataFile.print(h); dataFile.print(",");
+      dataFile.print(t); dataFile.print(",");
+      dataFile.print(f); dataFile.print(",");
+      dataFile.print(hic); dataFile.print(",");
+      dataFile.print(hif); dataFile.print(",");
+      dataFile.println(waterTempC);
       dataFile.close();
     } else {
-      Serial.println("Error opening data.txt file for writing!");
+      Serial.println("Error opening datalog.csv");
     }
   }
 }
 
-// Outputs the current status of the WiFi access point to the Serial Monitor
+// ---------- Print WiFi Status ----------
 void printWiFiStatus() {
-  Serial.print("SSID: ");
+  Serial.print("Access Point: ");
   Serial.println(WiFi.SSID());
-
-  IPAddress ip = WiFi.localIP();
-  Serial.print("IP Address: ");
-  Serial.println(ip);
-
-  Serial.print("To see this page in action, open a browser to http://");
-  Serial.println(ip);
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+  Serial.println("Open browser to access the sensor dashboard.");
 }
