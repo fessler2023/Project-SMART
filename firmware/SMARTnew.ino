@@ -10,7 +10,7 @@
   - Hosts a WiFi dashboard showing last 7 days of data with color-coded indicators.
 
   Author: Douglas Fessler
-  Date: 05262025
+  Date: 08262025
 */
 
 // ---------- Libraries ----------
